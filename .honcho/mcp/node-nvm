@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# node-nvm — run Node via nvm's current "default", resolved at spawn time.
+#
+# Referenced by a STABLE absolute path from ~/.cursor/mcp.json so the Honcho
+# MCP server survives `nvm install`/version upgrades (a pinned vX.Y.Z path would
+# dangle) and does not depend on the spawning process having node on its PATH
+# (the Cursor "My Machines" worker on orphic-lens does not).
+set -euo pipefail
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+resolve_node() {
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # nvm is a shell function; --no-use loads it without activating a version.
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh" --no-use >/dev/null 2>&1 || return 1
+    local alias_name ver
+    # Honor an explicit "honcho" pin if set, otherwise follow nvm's default.
+    for alias_name in honcho default node; do
+      ver="$(nvm version "$alias_name" 2>/dev/null || true)"
+      if [ -n "$ver" ] && [ "$ver" != "N/A" ] \
+         && [ -x "$NVM_DIR/versions/node/$ver/bin/node" ]; then
+        printf '%s\n' "$NVM_DIR/versions/node/$ver/bin/node"
+        return 0
+      fi
+    done
+  fi
+  local highest
+  highest="$(ls -d "$NVM_DIR"/versions/node/v*/bin/node 2>/dev/null | sort -V | tail -1 || true)"
+  if [ -n "$highest" ] && [ -x "$highest" ]; then
+    printf '%s\n' "$highest"
+    return 0
+  fi
+  command -v node 2>/dev/null || return 1
+}
+
+node_bin="$(resolve_node)" || {
+  echo "node-nvm: could not locate a Node runtime (NVM_DIR=$NVM_DIR)" >&2
+  exit 127
+}
+exec "$node_bin" "$@"
