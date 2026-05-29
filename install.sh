@@ -140,7 +140,13 @@ ensure_node() {
 }
 
 install_bun() {
-  if have bun; then
+  # If bun is already installed, just ensure it's on PATH and return. Checking
+  # ~/.bun/bin/bun (not only `have bun`) avoids re-running the official installer
+  # in non-login shells where bun isn't yet on PATH; each re-run re-appends a
+  # "# bun" block to the (symlinked) shell profiles.
+  if have bun || [[ -x "$HOME/.bun/bin/bun" ]]; then
+    export BUN_INSTALL="$HOME/.bun"
+    export PATH="$BUN_INSTALL/bin:$PATH"
     log "OK    bun $(bun --version)"
     return 0
   fi
