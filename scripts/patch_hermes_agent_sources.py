@@ -39,32 +39,31 @@ def regex_replace_once(path: Path, pattern: str, new: str) -> bool:
 
 def patch_chat_completions(root: Path) -> bool:
     path = root / "agent/transports/chat_completions.py"
-    old = '''        # Ollama/custom think=false
-        if params.get("is_custom_provider", False):
-            if reasoning_config and isinstance(reasoning_config, dict):
-                _effort = (reasoning_config.get("effort") or "").strip().lower()
-                _enabled = reasoning_config.get("enabled", True)
-                if _effort == "none" or _enabled is False:
-                    extra_body["think"] = False
-
-        if is_qwen:
-            extra_body["vl_high_resolution_images"] = True
+    old = '''        # Merge any pre-built extra_body additions
+        additions = params.get("extra_body_additions")
+        if additions:
+            extra_body.update(additions)
 '''
-    new = '''        # Ollama/custom think=false
-        if params.get("is_custom_provider", False):
-            if reasoning_config and isinstance(reasoning_config, dict):
-                _effort = (reasoning_config.get("effort") or "").strip().lower()
-                _enabled = reasoning_config.get("enabled", True)
-                if _effort == "none" or _enabled is False:
-                    extra_body["think"] = False
-                elif "qwen" in (params.get("model_lower") or ""):
-                    # llama.cpp/Qwen supports a per-request thinking budget.
-                    # Keep reasoning useful but bounded so tool-call turns don't
-                    # burn the whole output cap on repeated hidden reasoning.
-                    extra_body["reasoning_budget"] = 64
+    new = '''        # Merge any pre-built extra_body additions
+        additions = params.get("extra_body_additions")
+        if additions:
+            extra_body.update(additions)
 
-        if is_qwen:
-            extra_body["vl_high_resolution_images"] = True
+        # orphic-lens (custom llama.cpp / Qwen): bound per-request thinking so
+        # tool-call turns don't spend the whole output budget on hidden
+        # reasoning. llama.cpp honors a per-request reasoning_budget for Qwen,
+        # which keeps reasoning useful without burning the output cap in loops.
+        if params.get("is_custom_provider", False) and "qwen" in (model or "").lower():
+            _qwen_reasoning_off = bool(
+                reasoning_config
+                and isinstance(reasoning_config, dict)
+                and (
+                    (reasoning_config.get("effort") or "").strip().lower() == "none"
+                    or reasoning_config.get("enabled") is False
+                )
+            )
+            if not _qwen_reasoning_off:
+                extra_body.setdefault("reasoning_budget", 64)
 '''
     return replace_once(path, old, new)
 

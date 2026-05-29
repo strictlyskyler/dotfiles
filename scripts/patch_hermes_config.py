@@ -51,10 +51,7 @@ def patch_llm_block(block: dict) -> None:
 
 
 def patch_config(config_path: Path) -> bool:
-    if not config_path.exists():
-        print(f"SKIP  Hermes config ({config_path} not found)")
-        return False
-
+    created = not config_path.exists()
     data = load_yaml(config_path)
 
     agent = ensure_dict(data, "agent")
@@ -131,15 +128,20 @@ def patch_config(config_path: Path) -> bool:
         ensure_dict(models, alias)["context_length"] = CONTEXT_LENGTH
 
     save_yaml(config_path, data)
-    print("OK    Hermes config model/context defaults")
+    print(
+        "OK    Hermes config "
+        + ("created from orphic-lens defaults" if created else "model/context defaults")
+    )
     return True
 
 
 def patch_honcho_config(honcho_path: Path) -> None:
-    if not honcho_path.exists():
-        return
-    with honcho_path.open() as handle:
-        data = json.load(handle)
+    created = not honcho_path.exists()
+    if created:
+        data: dict = {}
+    else:
+        with honcho_path.open() as handle:
+            data = json.load(handle)
     data["baseUrl"] = HONCHO_BASE_URL
     hosts = ensure_dict(data, "hosts")
     hermes = ensure_dict(hosts, "hermes")
@@ -150,14 +152,16 @@ def patch_honcho_config(honcho_path: Path) -> None:
     hermes["memoryMode"] = "auto"
     hermes["recallMode"] = "tools"
     hermes["dialecticReasoningLevel"] = "minimal"
+    honcho_path.parent.mkdir(parents=True, exist_ok=True)
     with honcho_path.open("w") as handle:
         json.dump(data, handle, indent=2)
         handle.write("\n")
-    print("OK    Hermes Honcho config")
+    print("OK    Hermes Honcho config " + ("created" if created else "updated"))
 
 
 def main() -> int:
     hermes_home = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else Path.home() / ".hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
     patch_config(hermes_home / "config.yaml")
     patch_honcho_config(hermes_home / "honcho.json")
     return 0
