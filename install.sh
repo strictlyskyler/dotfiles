@@ -58,6 +58,17 @@ HERMES_PATCHER="$DOTFILES_DIR/scripts/patch_hermes_config.py"
 HERMES_SOURCE_PATCHER="$DOTFILES_DIR/scripts/patch_hermes_agent_sources.py"
 HERMES_INSTALLER_URL="https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
 
+# Honcho reachability. On the LAN, Honcho lives at orphic-lens:8100. Off-LAN we
+# forward that port over SSH (ssh.skyler.is) so localhost:8100 reaches the same
+# server. Both URLs are candidates in .honcho/config.json; the MCP bridge and the
+# bootstrap step both prefer the loopback candidate, so the tunnel "just works"
+# once it is up. Overridable via env for other hosts/users.
+HONCHO_PORT="${HONCHO_PORT:-8100}"
+HONCHO_TUNNEL_HOST="${HONCHO_TUNNEL_HOST:-ssh.skyler.is}"
+HONCHO_TUNNEL_USER="${HONCHO_TUNNEL_USER:-skyler}"
+HONCHO_LAN_URL="http://orphic-lens:${HONCHO_PORT}"
+HONCHO_LOOPBACK_URL="http://localhost:${HONCHO_PORT}"
+
 # ── package management ──────────────────────────────────────────────
 ensure_homebrew() {
   have brew && return 0
@@ -209,6 +220,39 @@ link_dotfiles() {
     cp "$DOTFILES_DIR/.exports.example" "$HOME/.exports"
     log "COPY  .exports (from template — fill in secrets)"
   fi
+}
+
+# macOS interactive shells use zsh, and the user's ~/.zshrc is machine-specific
+# (not a managed symlink), so the Linux/WSL .bashrc — which exports the Honcho
+# env and sources ~/.aliases — never runs there. Without this, honcho-up /
+# honcho-down / honcho-status, the hermes-* helpers, and the ai-* service
+# controls are simply undefined on macOS. Inject a marker-delimited block into
+# ~/.zshrc (creating the file if absent) to bring it to parity with .bashrc.
+# Idempotent: the block is only appended when its begin-marker is missing, so
+# re-running install.sh never duplicates it.
+ensure_zsh_aliases() {
+  local zshrc="$HOME/.zshrc"
+  local begin="# >>> dotfiles (managed by install.sh) >>>"
+  local end="# <<< dotfiles (managed by install.sh) <<<"
+
+  if [[ -f "$zshrc" ]] && grep -qF "$begin" "$zshrc"; then
+    log "OK    ~/.zshrc loads ~/.aliases (managed block present)"
+    return 0
+  fi
+
+  {
+    # Separate from existing content with a blank line, but only if the file
+    # already has something in it.
+    [[ -s "$zshrc" ]] && printf '\n'
+    printf '%s\n' "$begin"
+    printf '%s\n' "# macOS zsh parity with the Linux/WSL .bashrc: Honcho env + shared aliases"
+    printf '%s\n' "# (honcho-up/down/status/lan, hermes-*, ai-* service controls)."
+    printf '%s\n' 'export HONCHO_API_KEY="local"'
+    printf '%s\n' 'export HONCHO_PEER_NAME="skyler"'
+    printf '%s\n' '[ -f "$HOME/.aliases" ] && source "$HOME/.aliases"'
+    printf '%s\n' "$end"
+  } >> "$zshrc" || die "failed to update $zshrc"
+  log "GEN   ~/.zshrc managed block (Honcho env + sources ~/.aliases)"
 }
 
 install_mcp_bridge_deps() {
@@ -407,7 +451,7 @@ if not saw_tools:
 print("OK    Honcho MCP bridge smoke test")
 PY
   then
-    die "Honcho MCP smoke test failed — the bridge could not list tools. Is the Honcho server reachable (LAN: orphic-lens:8100, or run 'honcho-up' for the tunnel)? Bring it up and re-run ./install.sh."
+    die "Honcho MCP smoke test failed — the bridge could not list tools. The server should be reachable by now (LAN: orphic-lens:8100, or the auto SSH tunnel to $HONCHO_TUNNEL_HOST → localhost:8100). Confirm Honcho is up, then re-run ./install.sh."
   fi
 }
 
@@ -500,6 +544,18 @@ honcho_post() {
     -H "Content-Type: application/json" -d "{\"id\":\"$2\"}" >/dev/null 2>&1 || true
 }
 
+# True when a Honcho server answers at the given base URL (e.g. http://host:8100).
+honcho_http_ok() {
+  curl -sf --connect-timeout 2 --max-time 4 "$1/docs" >/dev/null 2>&1
+}
+
+# True when an SSH tunnel forwarding the Honcho port is already running. The
+# match is the -L spec only, so it also detects tunnels opened by the
+# honcho-up / honcho-down shell aliases (they use the same forward).
+honcho_tunnel_running() {
+  pgrep -f "ssh.*-L ${HONCHO_PORT}:localhost:${HONCHO_PORT}" >/dev/null 2>&1
+}
+
 ensure_orphic_lens_dns() {
   # Check /etc/hosts first (works even when the tunnel/server is down)
   if grep -qsE '^[^#].*[[:space:]]orphic-lens' /etc/hosts; then
@@ -535,6 +591,63 @@ ensure_orphic_lens_dns() {
   return 0
 }
 
+# Guarantee Honcho is reachable before the smoke test / bootstrap. On the LAN
+# that means orphic-lens:8100 answers directly. Off-LAN we open a detached SSH
+# tunnel (ssh -f -N -L 8100:localhost:8100 skyler@ssh.skyler.is) so localhost:8100
+# reaches the same server. The tunnel intentionally outlives the installer so
+# Cursor's MCP bridge and lifecycle hooks can use it; tear it down later with
+# 'honcho-down'.
+ensure_honcho_tunnel() {
+  if honcho_http_ok "$HONCHO_LAN_URL"; then
+    log "OK    honcho reachable on LAN ($HONCHO_LAN_URL)"
+    return 0
+  fi
+
+  # A tunnel may already be up (from a prior install or 'honcho-up').
+  if honcho_tunnel_running; then
+    if honcho_http_ok "$HONCHO_LOOPBACK_URL"; then
+      log "OK    honcho reachable via existing SSH tunnel ($HONCHO_LOOPBACK_URL)"
+      return 0
+    fi
+    die "An SSH tunnel for port $HONCHO_PORT is running but $HONCHO_LOOPBACK_URL is not answering. Honcho is probably down on $HONCHO_TUNNEL_HOST — start it ('ai-support-on'), or 'honcho-down' to clear the stale tunnel, then re-run ./install.sh."
+  fi
+
+  have ssh || die "ssh not found — required to tunnel Honcho from $HONCHO_TUNNEL_USER@$HONCHO_TUNNEL_HOST"
+
+  # -f -N: authenticate, set up the forward, then background with no remote
+  #        command (pure port-forward).
+  # ExitOnForwardFailure: make `ssh -f` return non-zero if the local port can't
+  #        bind, so the `|| die` below actually fires.
+  # accept-new: trust an unknown host key on first contact (avoids a hang on a
+  #        fresh machine) while still refusing a *changed* key.
+  # BatchMode (no TTY only): fail fast instead of hanging on a password prompt
+  #        in non-interactive installs; interactive runs can still prompt.
+  local ssh_opts=(
+    -f -N
+    -o ConnectTimeout=10
+    -o ServerAliveInterval=60
+    -o ExitOnForwardFailure=yes
+    -o StrictHostKeyChecking=accept-new
+  )
+  [[ -t 0 ]] || ssh_opts+=( -o BatchMode=yes )
+
+  log "TUN   honcho not on LAN — opening SSH tunnel to $HONCHO_TUNNEL_USER@$HONCHO_TUNNEL_HOST (-L $HONCHO_PORT:localhost:$HONCHO_PORT)"
+  ssh "${ssh_opts[@]}" -L "$HONCHO_PORT:localhost:$HONCHO_PORT" "$HONCHO_TUNNEL_USER@$HONCHO_TUNNEL_HOST" \
+    || die "Honcho SSH tunnel failed (ssh $HONCHO_TUNNEL_USER@$HONCHO_TUNNEL_HOST). Check SSH key/access and that local port $HONCHO_PORT is free."
+
+  # The forward is bound the moment ssh backgrounds, but the remote service may
+  # take a beat; poll briefly before giving up.
+  local i
+  for i in {1..10}; do
+    if honcho_http_ok "$HONCHO_LOOPBACK_URL"; then
+      log "OK    honcho reachable via SSH tunnel ($HONCHO_LOOPBACK_URL)"
+      return 0
+    fi
+    sleep 1
+  done
+  die "SSH tunnel to $HONCHO_TUNNEL_HOST is up but $HONCHO_LOOPBACK_URL never answered. Is Honcho running there? Start it with 'ai-support-on', then re-run ./install.sh."
+}
+
 bootstrap_honcho_server() {
   local config="$HOME/.honcho/config.json"
   [[ -f "$config" ]] || die "Honcho config missing: $config"
@@ -565,7 +678,7 @@ for url in urls:
   done <<< "$endpoints"
 
   if [[ -z "$endpoint" ]]; then
-    die "Honcho server not reachable. Tried: $(echo "$endpoints" | paste -sd ', ' -). Start it (LAN: orphic-lens) or run 'honcho-up' for the tunnel, then re-run ./install.sh."
+    die "Honcho server not reachable. Tried: $(echo "$endpoints" | paste -sd ', ' -). Start it on the LAN (orphic-lens) or via SSH ($HONCHO_TUNNEL_USER@$HONCHO_TUNNEL_HOST, 'ai-support-on'), then re-run ./install.sh."
   fi
 
   local api="$endpoint/v3"
@@ -604,6 +717,9 @@ install_bun
 log ""
 log "── Dotfiles ──"
 link_dotfiles
+if [[ "$PLATFORM" == macos ]]; then
+  ensure_zsh_aliases
+fi
 
 log ""
 log "── Honcho MCP bridge + Cursor integration ──"
@@ -622,6 +738,7 @@ patch_hermes
 log ""
 log "── Honcho server ──"
 ensure_orphic_lens_dns
+ensure_honcho_tunnel
 smoke_test_honcho_mcp
 bootstrap_honcho_server
 

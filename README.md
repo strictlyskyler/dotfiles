@@ -14,6 +14,10 @@ cd ~/src/dotfiles
 The script:
 
 1. Symlinks each dotfile into `$HOME` (existing files backed up as `*.bak`).
+   On macOS (zsh), it also injects a small managed block into `~/.zshrc` so
+   interactive shells source `~/.aliases` and export the Honcho env — giving
+   the `honcho-*`, `hermes-*`, and `ai-*` helpers parity with the Linux/WSL
+   `.bashrc`.
 2. Installs **bun** if missing.
 3. Clones/updates [cursor-honcho](https://github.com/plastic-labs/cursor-honcho)
    to `~/.honcho/plugins/cursor-honcho`, runs `bun install`, and applies
@@ -23,20 +27,30 @@ The script:
    launch command, and a detached Honcho warmup hook for this machine.
 5. Ensures `orphic-lens` resolves (adds `/etc/hosts` entry if needed;
    may prompt for `sudo`).
-6. Patches an existing `~/.hermes/config.yaml` for the orphic-lens model:
+6. **Ensures Honcho is reachable** — if it doesn't answer on the LAN
+   (`orphic-lens:8100`), opens a detached SSH tunnel to
+   `skyler@ssh.skyler.is` forwarding `localhost:8100`, so off-LAN
+   machines reach the same server before the steps below run. The
+   tunnel outlives the installer; tear it down later with `honcho-down`.
+7. Patches an existing `~/.hermes/config.yaml` for the orphic-lens model:
    `Qwen_Qwen3-14B-Q4_K_M.gguf`, 65,536 token context, and matching
    Ollama `num_ctx`. It also reapplies local Hermes source patches after
    `hermes setup` or `hermes update`.
-7. **Bootstraps the Honcho server** — creates workspaces, peers, and
+8. **Bootstraps the Honcho server** — creates workspaces, peers, and
    sessions for every host in `.honcho/config.json`. Idempotent and
    safe to re-run. Skips gracefully if the server is unreachable.
 
 After running, restart Cursor.
 
-When away from the LAN, run `honcho-up` before starting Cursor. It opens
-an SSH tunnel to `ssh.skyler.is` and switches Honcho config to
-`http://localhost:8100` so both MCP tools and Cursor hooks use the tunnel.
-Run `honcho-down` or `honcho-lan` when back on the LAN.
+The installer opens this tunnel automatically when Honcho isn't on the
+LAN (step 6 above), so a fresh off-LAN machine works after `./install.sh`
+with no manual step — provided SSH access to `skyler@ssh.skyler.is` is set
+up (key-based auth recommended). Override the target with the
+`HONCHO_TUNNEL_USER` / `HONCHO_TUNNEL_HOST` env vars.
+
+In later shells, `honcho-up` opens the same tunnel and points the Honcho
+config at `http://localhost:8100`; `honcho-down` / `honcho-lan` switch back
+to the LAN endpoint. (`honcho-status` shows the current tunnel + endpoint.)
 
 For Hermes away from the LAN, run `hermes-up`. It opens the LLM tunnel on
 `localhost:11434`, ensures the Honcho tunnel is up, and switches Hermes'
