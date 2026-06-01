@@ -1,4 +1,9 @@
 .exports
+.exports.ps1
+
+# Windows installer artifacts
+*.bak
+
 .honcho/mcp/node_modules/
 .honcho/activity.log
 .honcho/cache.json

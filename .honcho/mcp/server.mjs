@@ -6,10 +6,14 @@ import { z } from "zod";
 
 const API_KEY = process.env.HONCHO_API_KEY || "local";
 
+// HOME is unset on Windows; fall back to USERPROFILE so the same server.mjs
+// works under PowerShell/cmd as well as POSIX shells.
+const HOME = process.env.HOME || process.env.USERPROFILE || "";
+
 function loadConfig() {
   try {
     return JSON.parse(readFileSync(
-      join(process.env.HOME, ".honcho", "config.json"), "utf8"));
+      join(HOME, ".honcho", "config.json"), "utf8"));
   } catch {
     return {};
   }
