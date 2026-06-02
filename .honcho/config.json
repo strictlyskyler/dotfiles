@@ -33,6 +33,7 @@
     "/home/skyler/dotfiles": "skyler-dotfiles",
     "/home/skyler/.honcho/plugins/cursor-honcho/plugins/honcho": "skyler-honcho",
     "/home/skyler/src/cinf/cinf-org": "skyler-cinf-org",
-    "/home/skyler/src/cinf/strictlyskyler-cinf": "skyler-strictlyskyler-cinf"
+    "/home/skyler/src/cinf/strictlyskyler-cinf": "skyler-strictlyskyler-cinf",
+    "/Users/skyler": "skyler-skyler"
   }
 }
